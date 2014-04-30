@@ -47,9 +47,13 @@ Example usage::
 
     import exiftool
 
+    for d in exiftool.metadata("a.jpg", "b.png", "c.tif"):
+        print("{:20.20} {:20.20}".format(d["SourceFile"],
+                                         d["EXIF:DateTimeOriginal"]))
+    
     files = ["a.jpg", "b.png", "c.tif"]
-    with exiftool.ExifTool() as et:
-        metadata = et.get_metadata_batch(files)
+    with exiftool.batch() as exif_batch:
+        metadata = exif_batch.metadata(*files)
     for d in metadata:
         print("{:20.20} {:20.20}".format(d["SourceFile"],
                                          d["EXIF:DateTimeOriginal"]))
@@ -63,6 +67,7 @@ import os
 import json
 import warnings
 import codecs
+import pprint
 
 try:        # Py3k compatibility
     basestring
@@ -325,3 +330,77 @@ class ExifTool(object):
         ``None`` if this tag was not found in the file.
         """
         return self.get_tag_batch(tag, [filename])[0]
+
+
+class MultiFileMetadata(object):
+    # iterable or FileMetadata
+    # dictionary like
+
+    def __iter__(self):
+        '''Returns iterable of individual FileMetadata objects'''
+        pass
+
+    def __getitem__(self, key):
+        pass
+
+    def __setitem__(self, key, value):
+        pass
+
+    def write(self):
+        '''Bulk update'''
+        pass
+
+
+class FileMetadata(object):
+
+    def __init__(self, get_values_fn):
+        self._get_values_fn = get_values_fn
+
+    def _get_values(self):
+        if not hasattr(self, '_values'):
+            self._values = self._get_values_fn()
+        return self._values
+
+    def __getitem__(self, key):
+        return self._get_values().get(key)
+
+    def __setitem__(self, key, value):
+        # TODO append edits
+        raise
+
+    def write(self):
+        # TODO commit edits
+        raise
+
+    def __repr__(self):
+        return repr(self._get_values())
+
+    def __str__(self):
+        values = self._get_values()
+        return "FileMetadata for '%s'\n%s" % (values['SourceFile'], pprint.pformat(self._get_values()))
+
+class DynamicTagValue(object):
+    '''Used to indicate that substituions of existing tag value names should take place.'''
+
+def batch(executable=None):
+    pass
+
+def metadata(*file_paths):
+    '''Returns the metadata for files.
+
+    This returns a FileMetadata if only one file is specified. If a dir or file pattern is 
+    specified then this returns a MultiFileMetadata.
+    '''
+
+    if len(file_paths) == 1 and os.path.isfile(file_paths[0]):
+        file_path = file_paths[0]
+        def get_exif():
+            with ExifTool() as et:
+                return next(x for x in et.execute_json(file_path))
+        return FileMetadata(get_exif)
+    else:
+        return None
+    
+
+
+__all__ = ("batch", "metadata")
