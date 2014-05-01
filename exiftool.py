@@ -128,10 +128,12 @@ class ExifTool(object):
     argument to the constructor.  The default value ``exiftool`` will
     only work if the executable is in your ``PATH``.
 
-    Most methods of this class are only available after calling
-    :py:meth:`start()`, which will actually launch the subprocess.  To
-    avoid leaving the subprocess running, make sure to call
-    :py:meth:`terminate()` method when finished using the instance.
+    By default every call is made with a separate subprocess.
+
+    Methods can be run in batch mode in the same process by calling
+    :py:meth:`start()`, which will launch the subprocess with -stay_open.  
+    To avoid leaving the subprocess running, make sure to call
+    :py:meth:`terminate()` method when finished with your calls.
     This method will also be implicitly called when the instance is
     garbage collected, but there are circumstance when this won't ever
     happen, so you should not rely on the implicit process
@@ -157,11 +159,12 @@ class ExifTool(object):
        associated with a running subprocess.
     """
 
-    def __init__(self, executable_=None):
+    def __init__(self, executable_=None, fast=True):
         if executable_ is None:
             self.executable = executable
         else:
             self.executable = executable_
+        self.fast = fast
         self.running = False
 
     def start(self):
@@ -176,9 +179,12 @@ class ExifTool(object):
             warnings.warn("ExifTool already running; doing nothing.")
             return
         with open(os.devnull, "w") as devnull:
+            params = ["-stay_open", "True",  "-@", "-",
+                 "-common_args", "-G", "-n"]
+            if self.fast:
+                params = ["-fast2"] + params
             self._process = subprocess.Popen(
-                [self.executable, "-stay_open", "True",  "-@", "-",
-                 "-common_args", "-G", "-n"],
+                [self.executable] + params,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=devnull)
         self.running = True
@@ -298,11 +304,12 @@ class ExifTool(object):
                     params.append(u'-%s=%s' % (tag, value))
             params.append(b'-r')
             params += file_paths
-            result = self.execute(*params)
+            result = self.execute(*map(fsencode, params))
             if not result or 'errors' in result:
-                # TODO figure out what to do with unchanged files
                 # Fail fast if errors are detected
                 raise Exception("Unable to update files %s: %s" % (', '.join('"{0}"'.format(fp) for fp in file_paths), result))
+            elif 'unchanged' in results:
+                logging.warning('Some files were unchanged: %s' % results)
 
 class CopiedValue(object):
     '''Used to indicate that this value is constructed by copying other tags values
@@ -323,7 +330,7 @@ class CopiedValue(object):
 
 
 class MultiFileTagValue(object):
-    '''Used to allow for operator overloading.'''
+    '''Used to allow for operator overloading on += and -= assignment.'''
 
     def __init__(self, container, tag):
         self.container = container
@@ -337,7 +344,9 @@ class MultiFileTagValue(object):
         exif_tool = self.container.exif_tool
         edit = self.container._edits.get(self.tag)
         if isinstance(edit, CopiedValue):
-            for render in exif_tool.execute('-p', self.value.expression, '-r', *self.container.file_paths).split('\n'):
+            params = ['-p', self.value.expression, '-r'] + self.container.file_paths
+            params = map(fsencode, params)
+            for render in exif_tool.execute(*params).split('\n'):
                 yield render
         else:
             for exif_values in exif_tool.execute_json('-%s' % self.tag, '-r', *self.container.file_paths):
@@ -345,19 +354,30 @@ class MultiFileTagValue(object):
 
     def __iadd__(self, other):
         self.container._edits['%s+' % self.tag] = other
+        if self.container.autowrite:
+            self.container.write()
         return self
 
     def __isub__(self, other):
         self.container._edits['%s-' % self.tag] = other
+        if self.container.autowrite:
+            self.container.write()
         return self
 
+length_pattern = re.compile('\d+(?= files failed condition)')
+
 class MultiFileMetadata(object):
+    '''Represents the metadata for multiple files.
+
+    You can easily aggregate and batch modify a set files using standard dict like operations.
+    '''
     # iterable or FileMetadata
     # dictionary like
 
-    def __init__(self, file_paths, exif_tool):
+    def __init__(self, file_paths, exif_tool, autowrite=True):
         self.file_paths = file_paths
         self.exif_tool = exif_tool
+        self.autowrite = autowrite
         self._edits = {}
 
     def keys(self):
@@ -369,9 +389,13 @@ class MultiFileMetadata(object):
             for value in metadata.values():
                 yield value
 
+    def __len__(self):
+        result = self.exif_tool.execute(b'-if', b'false', b'-r', *map(fsencode, self.file_paths))
+        return int(length_pattern.findall(result)[0])
+
     def __iter__(self):
         '''Returns iterable of individual FileMetadata objects'''
-        for exif_values in self.exif_tool.execute_json("-r", *self.file_paths):
+        for exif_values in self.exif_tool.execute_json(b'-r', *self.file_paths):
             yield FileMetadata(exif_values, self.exif_tool)
 
     def __contains__(self, item):
@@ -384,19 +408,26 @@ class MultiFileMetadata(object):
     def __setitem__(self, key, value):
         # TODO Account for MultiFileMetadataItem in case of += or assigning from another field
         self._edits[key] = value
+        if self.autowrite:
+            self.write()
 
     def __delitem__(self, key):
         self._edits[key] = None
+        if self.autowrite:
+            self.write()
+
+    def __repr__(self):
+        return 'MultiFileMetadata for %s' % ', '.join('"{0}"'.format(fp) for fp in self.file_paths)
 
     def write(self):
-        '''Bulk update of all files'''
+        '''Persist changes to files on disk.'''
         if self._edits:
             self.exif_tool.write_metadata(*self.file_paths, **self._edits)
             self._edits = {}
 
 class FileMetadata(dict):
 
-    def __init__(self, values, exif_tool):
+    def __init__(self, values, exif_tool, autowrite=True):
         super(FileMetadata, self).__init__(values)
         self.exif_tool = exif_tool
         self.file_path = values['SourceFile']
@@ -409,10 +440,14 @@ class FileMetadata(dict):
     def __setitem__(self, key, value):
         super(FileMetadata, self).__setitem__(key, value)
         self._edits[key] = value
+        if self.autowrite:
+            self.write()
 
     def __delitem__(self, key):
         super(FileMetadata, self).__delitem__(key)
         self._edits[key] =  None
+        if self.autowrite:
+            self.write()
 
     def write(self):
         '''Store changes to disk'''
@@ -423,12 +458,8 @@ class FileMetadata(dict):
             self.update(self.exif_tool.metadata(self.file_path))
 
 
-
-def batch(executable=None):
-    return ExifTool(executable_=executable)
-
 def metadata(*file_paths):
-    '''Returns the metadata for files.
+    '''Convenience method that returns the metadata for files.
 
     This returns a FileMetadata if only one file is specified. If a dir or file pattern is 
     specified then this returns a MultiFileMetadata.
@@ -436,4 +467,4 @@ def metadata(*file_paths):
     with ExifTool() as et:
         return et.metadata(*file_paths)
 
-__all__ = ("batch", "metadata")
+__all__ = ("metadata", "ExifTool", "CopiedValue")
