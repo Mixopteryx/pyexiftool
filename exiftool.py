@@ -308,8 +308,8 @@ class ExifTool(object):
             if not result or 'errors' in result:
                 # Fail fast if errors are detected
                 raise Exception("Unable to update files %s: %s" % (', '.join('"{0}"'.format(fp) for fp in file_paths), result))
-            elif 'unchanged' in results:
-                logging.warning('Some files were unchanged: %s' % results)
+            elif 'unchanged' in result:
+                logging.warning('Some files were unchanged: %s' % result)
 
 class CopiedValue(object):
     '''Used to indicate that this value is constructed by copying other tags values
@@ -324,9 +324,9 @@ class CopiedValue(object):
     def __init__(self, expression):
         self.expression = expression
 
-    def render(self, exif_tool, *file_paths):
+    def __repr__(self):
         # TODO render using "-p"
-        pass
+        return "CopiedValue('%s')" % self.expression
 
 
 class MultiFileTagValue(object):
@@ -431,6 +431,7 @@ class FileMetadata(dict):
         super(FileMetadata, self).__init__(values)
         self.exif_tool = exif_tool
         self.file_path = values['SourceFile']
+        self.autowrite = autowrite
         self._edits = {}
 
     def __getitem__(self, key):
