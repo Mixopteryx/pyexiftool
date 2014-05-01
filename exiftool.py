@@ -47,16 +47,16 @@ Example usage::
 
     import exiftool
 
-    for d in exiftool.metadata("a.jpg", "b.png", "c.tif"):
-        print("{:20.20} {:20.20}".format(d["SourceFile"],
-                                         d["EXIF:DateTimeOriginal"]))
+    # Quick access for single files 
+    for tag, value in exiftool.metadata("a.jpg").items():
+        print("%s: %s" % (tag, value))
     
+    # Batch access and bulk assignment for high performance
     files = ["a.jpg", "b.png", "c.tif"]
-    with exiftool.batch() as exif_batch:
-        metadata = exif_batch.metadata(*files)
-    for d in metadata:
-        print("{:20.20} {:20.20}".format(d["SourceFile"],
-                                         d["EXIF:DateTimeOriginal"]))
+    with exiftool.ExifTool() as et:
+        metadata = et.metadata(*files)
+        print(list(metadata["SourceFile"]))
+        metadata["File:FileModifyDate"] = metadata["EXIF:DateTimeOriginal"]
 """
 
 from __future__ import unicode_literals
