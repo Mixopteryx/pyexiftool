@@ -69,6 +69,7 @@ import warnings
 import codecs
 import logging
 import itertools
+import re
 
 try:        # Py3k compatibility
     basestring
@@ -181,6 +182,8 @@ class ExifTool(object):
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=devnull)
         self.running = True
+        #self.groups = ''.join(et.execute(b'-listg').split('\n')[1:-1]).split()
+        #self.tag_pattern =  r'(%s):\w+' % '|'.join(groups)
 
     def terminate(self):
         """Terminate the ``exiftool`` process of this instance.
@@ -268,7 +271,7 @@ class ExifTool(object):
         as Unicode strings in Python 3.x.
         """
         params = map(fsencode, params)
-        return json.loads(self.execute(b"-j", *params).decode("utf-8"))
+        return json.loads(self.execute(b"-j", b"-struct", *params).decode("utf-8"))
 
 
     def metadata(self, *file_paths):
@@ -284,6 +287,69 @@ class ExifTool(object):
         else:
             return MultiFileMetadata(file_paths, exif_tool=self)
 
+    def write_metadata(self, *file_paths, **tags):
+        '''Bulk update of tags for files'''
+        if tags:
+            params = []
+            for tag, value in tags.items():
+                if isinstance(value, CopiedValue):
+                    params.append(u'-%s<%s' % (tag, value.expression))
+                else:
+                    params.append(u'-%s=%s' % (tag, value))
+            params.append(b'-r')
+            params += file_paths
+            result = self.execute(*params)
+            if not result or 'errors' in result:
+                # TODO figure out what to do with unchanged files
+                # Fail fast if errors are detected
+                raise Exception("Unable to update files %s: %s" % (', '.join('"{0}"'.format(fp) for fp in file_paths), result))
+
+class CopiedValue(object):
+    '''Used to indicate that this value is constructed by copying other tags values
+
+    For safety all tag names should be written as ${TAG}. 
+    See the '-tagsFromFile' and '-p' options for details on acceptable formats.
+    '''
+
+    # TODO date format
+    # TODO other formats?
+
+    def __init__(self, expression):
+        self.expression = expression
+
+    def render(self, exif_tool, *file_paths):
+        # TODO render using "-p"
+        pass
+
+
+class MultiFileTagValue(object):
+    '''Used to allow for operator overloading.'''
+
+    def __init__(self, container, tag):
+        self.container = container
+        self.tag = tag
+
+    def __iter__(self):
+        '''Returns iterable of all values of a given field for every FileMetadata
+
+        This is useful if you intend to aggregate the values in some way.
+        '''
+        exif_tool = self.container.exif_tool
+        edit = self.container._edits.get(self.tag)
+        if isinstance(edit, CopiedValue):
+            for render in exif_tool.execute('-p', self.value.expression, '-r', *self.container.file_paths).split('\n'):
+                yield render
+        else:
+            for exif_values in exif_tool.execute_json('-%s' % self.tag, '-r', *self.container.file_paths):
+                yield edit if self.tag in self.container._edits else exif_values.get(self.tag, None)
+
+    def __iadd__(self, other):
+        self.container._edits['%s+' % self.tag] = other
+        return self
+
+    def __isub__(self, other):
+        self.container._edits['%s-' % self.tag] = other
+        return self
 
 class MultiFileMetadata(object):
     # iterable or FileMetadata
@@ -292,6 +358,7 @@ class MultiFileMetadata(object):
     def __init__(self, file_paths, exif_tool):
         self.file_paths = file_paths
         self.exif_tool = exif_tool
+        self._edits = {}
 
     def keys(self):
         return {key for key in itertools.chain.from_iterable(self)}
@@ -311,22 +378,21 @@ class MultiFileMetadata(object):
         return item in self.keys()
 
     def __getitem__(self, key):
-        '''Returns iterable of all values of a given field for every FileMetadata
-
-        This is useful if you intend to aggregate the values in some way.
-        '''
-        for exif_values in self.exif_tool.execute_json("-" + key, "-r", *self.file_paths):
-            yield exif_values.get(key, None)
+        # TODO account for edits and render appropriately
+        return MultiFileTagValue(self, key)
 
     def __setitem__(self, key, value):
-        raise
+        # TODO Account for MultiFileMetadataItem in case of += or assigning from another field
+        self._edits[key] = value
 
     def __delitem__(self, key):
-        raise
+        self._edits[key] = None
 
     def write(self):
-        '''Bulk update'''
-        raise
+        '''Bulk update of all files'''
+        if self._edits:
+            self.exif_tool.write_metadata(*self.file_paths, **self._edits)
+            self._edits = {}
 
 class FileMetadata(dict):
 
@@ -334,39 +400,28 @@ class FileMetadata(dict):
         super(FileMetadata, self).__init__(values)
         self.exif_tool = exif_tool
         self.file_path = values['SourceFile']
-        self._edits = []
+        self._edits = {}
 
     def __getitem__(self, key):
+        # TODO check for edits and render appropriately
         return super(FileMetadata, self).__getitem__(key)
 
     def __setitem__(self, key, value):
         super(FileMetadata, self).__setitem__(key, value)
-        self._edits.append((key, value))
+        self._edits[key] = value
 
     def __delitem__(self, key):
         super(FileMetadata, self).__delitem__(key)
-        self._edits.append((key, None))
+        self._edits[key] =  None
 
     def write(self):
         '''Store changes to disk'''
         if self._edits:
-            params = []
-            for tag, value in self._edits:
-                if isinstance(value, DynamicTagValue):
-                    raise
-                else:
-                    params.append(u'-%s=%s' % (tag, value))
-            params.append(self.file_path)
-            result = self.exif_tool.execute(*params)
-            if not result or 'errors' in result:
-                # Fail fast if errors are detected
-                raise Exception("Unable to update file '%s': %s" % (self.file_path, result))
-            self._edits = []
+            self.exif_tool.write_metadata(self.file_path, **self._edits)
+            self._edits.clear()
+            self.clear()
+            self.update(self.exif_tool.metadata(self.file_path))
 
-class DynamicTagValue(object):
-    '''Used to indicate that substituions of existing tag value names should take place.'''
-    # TODO date format
-    # TODO tag names
 
 
 def batch(executable=None):
