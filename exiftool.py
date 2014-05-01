@@ -67,7 +67,8 @@ import os
 import json
 import warnings
 import codecs
-import pprint
+import logging
+import itertools
 
 try:        # Py3k compatibility
     basestring
@@ -204,12 +205,27 @@ class ExifTool(object):
     def __del__(self):
         self.terminate()
 
+    def _execute(self, *params):
+        if not self.running:
+            raise ValueError("ExifTool instance not running.")
+        logging.debug("Executing '%s'" % b"\n".join(params + (b"-execute\n",)))
+        self._process.stdin.write(b"\n".join(params + (b"-execute\n",)))
+        self._process.stdin.flush()
+        output = b""
+        fd = self._process.stdout.fileno()
+        while not output[-32:].strip().endswith(sentinel):
+            output += os.read(fd, block_size)
+        result = output.strip()[:-len(sentinel)]
+        logging.debug("Result: '%s'" % result.decode('utf-8'))
+        return result
+
     def execute(self, *params):
         """Execute the given batch of parameters with ``exiftool``.
 
         This method accepts any number of parameters and sends them to
-        the attached ``exiftool`` process.  The process must be
-        running, otherwise ``ValueError`` is raised.  The final
+        the attached ``exiftool`` process.  If there is no attached 
+        ``exiftool`` process then this execution will create one for the 
+        life time of the execution of this method.  The final
         ``-execute`` necessary to actually run the batch is appended
         automatically; see the documentation of :py:meth:`start()` for
         the common options.  The ``exiftool`` output is read up to the
@@ -223,15 +239,11 @@ class ExifTool(object):
         .. note:: This is considered a low-level method, and should
            rarely be needed by application developers.
         """
-        if not self.running:
-            raise ValueError("ExifTool instance not running.")
-        self._process.stdin.write(b"\n".join(params + (b"-execute\n",)))
-        self._process.stdin.flush()
-        output = b""
-        fd = self._process.stdout.fileno()
-        while not output[-32:].strip().endswith(sentinel):
-            output += os.read(fd, block_size)
-        return output.strip()[:-len(sentinel)]
+        if self.running:
+            return self._execute(*params)
+        else:
+            with self as et:
+                return et._execute(*params)
 
     def execute_json(self, *params):
         """Execute the given batch of parameters and parse the JSON output.
@@ -281,17 +293,29 @@ class MultiFileMetadata(object):
         self.file_paths = file_paths
         self.exif_tool = exif_tool
 
+    def keys(self):
+        return {key for key in itertools.chain.from_iterable(self)}
+
+    def values(self):
+        # Not very useful without key names, but here for the sake of completion
+        for metadata in self:
+            for value in metadata.values():
+                yield value
+
     def __iter__(self):
         '''Returns iterable of individual FileMetadata objects'''
-        for exif_values in self._execute("-r", *self.file_paths):
+        for exif_values in self.exif_tool.execute_json("-r", *self.file_paths):
             yield FileMetadata(exif_values, self.exif_tool)
+
+    def __contains__(self, item):
+        return item in self.keys()
 
     def __getitem__(self, key):
         '''Returns iterable of all values of a given field for every FileMetadata
 
         This is useful if you intend to aggregate the values in some way.
         '''
-        for exif_values in self._execute("-" + key, "-r", *self.file_paths):
+        for exif_values in self.exif_tool.execute_json("-" + key, "-r", *self.file_paths):
             yield exif_values.get(key, None)
 
     def __setitem__(self, key, value):
@@ -304,18 +328,12 @@ class MultiFileMetadata(object):
         '''Bulk update'''
         raise
 
-    def _execute(self, *params):
-        '''Starts the ExifTool if it is not started. Only stops exif tool if it started it to allow batch operations.'''
-        if self.exif_tool.running:
-            return self.exif_tool.execute_json(*params)
-        else:
-            with self.exif_tool as et:
-                return et.execute_json(*params)
-
 class FileMetadata(dict):
 
     def __init__(self, values, exif_tool):
         super(FileMetadata, self).__init__(values)
+        self.exif_tool = exif_tool
+        self.file_path = values['SourceFile']
         self._edits = []
 
     def __getitem__(self, key):
@@ -323,21 +341,32 @@ class FileMetadata(dict):
 
     def __setitem__(self, key, value):
         super(FileMetadata, self).__setitem__(key, value)
-        # TODO append edits
-        raise
+        self._edits.append((key, value))
 
     def __delitem__(self, key):
         super(FileMetadata, self).__delitem__(key)
-        # TODO append edits
-        raise
+        self._edits.append((key, None))
 
     def write(self):
         '''Store changes to disk'''
-        # TODO commit edits
-        raise
+        if self._edits:
+            params = []
+            for tag, value in self._edits:
+                if isinstance(value, DynamicTagValue):
+                    raise
+                else:
+                    params.append(u'-%s=%s' % (tag, value))
+            params.append(self.file_path)
+            result = self.exif_tool.execute(*params)
+            if not result or 'errors' in result:
+                # Fail fast if errors are detected
+                raise Exception("Unable to update file '%s': %s" % (self.file_path, result))
+            self._edits = []
 
 class DynamicTagValue(object):
     '''Used to indicate that substituions of existing tag value names should take place.'''
+    # TODO date format
+    # TODO tag names
 
 
 def batch(executable=None):
