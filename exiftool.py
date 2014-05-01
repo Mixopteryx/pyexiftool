@@ -319,7 +319,7 @@ class FileMetadata(dict):
         self._edits = []
 
     def __getitem__(self, key):
-        return self._values[key]
+        return super(FileMetadata, self).__getitem__(key)
 
     def __setitem__(self, key, value):
         super(FileMetadata, self).__setitem__(key, value)
