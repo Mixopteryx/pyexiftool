@@ -300,6 +300,8 @@ class ExifTool(object):
             for tag, value in tags.items():
                 if isinstance(value, CopiedValue):
                     params.append(u'-%s<%s' % (tag, value.expression))
+                elif isinstance(value, MultiFileTagValue):
+                    params.append(u'-%s<$%s' % (tag, value.tag))
                 else:
                     params.append(u'-%s=%s' % (tag, value))
             params.append(b'-r')
@@ -407,7 +409,7 @@ class MultiFileMetadata(object):
 
     def __setitem__(self, key, value):
         # TODO Account for MultiFileMetadataItem in case of += or assigning from another field
-        if not isinstance(value, MultiFileTagValue):
+        if not isinstance(value, MultiFileTagValue) or value.tag != key:
             self._edits[key] = value
             if self.autowrite:
                 self.write()
