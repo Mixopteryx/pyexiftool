@@ -258,132 +258,90 @@ class ExifTool(object):
         params = map(fsencode, params)
         return json.loads(self.execute(b"-j", *params).decode("utf-8"))
 
-    def get_metadata_batch(self, filenames):
-        """Return all meta-data for the given files.
 
-        The return value will have the format described in the
-        documentation of :py:meth:`execute_json()`.
-        """
-        return self.execute_json(*filenames)
+    def metadata(self, *file_paths):
+        '''Returns the metadata for files.
 
-    def get_metadata(self, filename):
-        """Return meta-data for a single file.
-
-        The returned dictionary has the format described in the
-        documentation of :py:meth:`execute_json()`.
-        """
-        return self.execute_json(filename)[0]
-
-    def get_tags_batch(self, tags, filenames):
-        """Return only specified tags for the given files.
-
-        The first argument is an iterable of tags.  The tag names may
-        include group names, as usual in the format <group>:<tag>.
-
-        The second argument is an iterable of file names.
-
-        The format of the return value is the same as for
-        :py:meth:`execute_json()`.
-        """
-        # Explicitly ruling out strings here because passing in a
-        # string would lead to strange and hard-to-find errors
-        if isinstance(tags, basestring):
-            raise TypeError("The argument 'tags' must be "
-                            "an iterable of strings")
-        if isinstance(filenames, basestring):
-            raise TypeError("The argument 'filenames' must be "
-                            "an iterable of strings")
-        params = ["-" + t for t in tags]
-        params.extend(filenames)
-        return self.execute_json(*params)
-
-    def get_tags(self, tags, filename):
-        """Return only specified tags for a single file.
-
-        The returned dictionary has the format described in the
-        documentation of :py:meth:`execute_json()`.
-        """
-        return self.get_tags_batch(tags, [filename])[0]
-
-    def get_tag_batch(self, tag, filenames):
-        """Extract a single tag from the given files.
-
-        The first argument is a single tag name, as usual in the
-        format <group>:<tag>.
-
-        The second argument is an iterable of file names.
-
-        The return value is a list of tag values or ``None`` for
-        non-existent tags, in the same order as ``filenames``.
-        """
-        data = self.get_tags_batch([tag], filenames)
-        result = []
-        for d in data:
-            d.pop("SourceFile")
-            result.append(next(iter(d.values()), None))
-        return result
-
-    def get_tag(self, tag, filename):
-        """Extract a single tag from a single file.
-
-        The return value is the value of the specified tag, or
-        ``None`` if this tag was not found in the file.
-        """
-        return self.get_tag_batch(tag, [filename])[0]
+        This returns a FileMetadata if only one file is specified. If a dir or file pattern is 
+        specified then this returns a MultiFileMetadata.
+        '''
+        if len(file_paths) == 1 and os.path.isfile(file_paths[0]):
+            file_path = file_paths[0]
+            exif_values = next(x for x in self.execute_json(file_path))
+            return FileMetadata(exif_values, exif_tool=self)
+        else:
+            return MultiFileMetadata(file_paths, exif_tool=self)
 
 
 class MultiFileMetadata(object):
     # iterable or FileMetadata
     # dictionary like
 
+    def __init__(self, file_paths, exif_tool):
+        self.file_paths = file_paths
+        self.exif_tool = exif_tool
+
     def __iter__(self):
         '''Returns iterable of individual FileMetadata objects'''
-        pass
+        for exif_values in self._execute("-r", *self.file_paths):
+            yield FileMetadata(exif_values, self.exif_tool)
 
     def __getitem__(self, key):
-        pass
+        '''Returns iterable of all values of a given field for every FileMetadata
+
+        This is useful if you intend to aggregate the values in some way.
+        '''
+        for exif_values in self._execute("-" + key, "-r", *self.file_paths):
+            yield exif_values.get(key, None)
 
     def __setitem__(self, key, value):
-        pass
+        raise
+
+    def __delitem__(self, key):
+        raise
 
     def write(self):
         '''Bulk update'''
-        pass
+        raise
 
+    def _execute(self, *params):
+        '''Starts the ExifTool if it is not started. Only stops exif tool if it started it to allow batch operations.'''
+        if self.exif_tool.running:
+            return self.exif_tool.execute_json(*params)
+        else:
+            with self.exif_tool as et:
+                return et.execute_json(*params)
 
-class FileMetadata(object):
+class FileMetadata(dict):
 
-    def __init__(self, get_values_fn):
-        self._get_values_fn = get_values_fn
-
-    def _get_values(self):
-        if not hasattr(self, '_values'):
-            self._values = self._get_values_fn()
-        return self._values
+    def __init__(self, values, exif_tool):
+        super(FileMetadata, self).__init__(values)
+        self._edits = []
 
     def __getitem__(self, key):
-        return self._get_values().get(key)
+        return self._values[key]
 
     def __setitem__(self, key, value):
+        super(FileMetadata, self).__setitem__(key, value)
+        # TODO append edits
+        raise
+
+    def __delitem__(self, key):
+        super(FileMetadata, self).__delitem__(key)
         # TODO append edits
         raise
 
     def write(self):
+        '''Store changes to disk'''
         # TODO commit edits
         raise
-
-    def __repr__(self):
-        return repr(self._get_values())
-
-    def __str__(self):
-        values = self._get_values()
-        return "FileMetadata for '%s'\n%s" % (values['SourceFile'], pprint.pformat(self._get_values()))
 
 class DynamicTagValue(object):
     '''Used to indicate that substituions of existing tag value names should take place.'''
 
+
 def batch(executable=None):
-    pass
+    return ExifTool(executable_=executable)
 
 def metadata(*file_paths):
     '''Returns the metadata for files.
@@ -391,16 +349,7 @@ def metadata(*file_paths):
     This returns a FileMetadata if only one file is specified. If a dir or file pattern is 
     specified then this returns a MultiFileMetadata.
     '''
-
-    if len(file_paths) == 1 and os.path.isfile(file_paths[0]):
-        file_path = file_paths[0]
-        def get_exif():
-            with ExifTool() as et:
-                return next(x for x in et.execute_json(file_path))
-        return FileMetadata(get_exif)
-    else:
-        return None
-    
-
+    with ExifTool() as et:
+        return et.metadata(*file_paths)
 
 __all__ = ("batch", "metadata")
