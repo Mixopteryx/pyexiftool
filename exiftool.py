@@ -407,9 +407,10 @@ class MultiFileMetadata(object):
 
     def __setitem__(self, key, value):
         # TODO Account for MultiFileMetadataItem in case of += or assigning from another field
-        self._edits[key] = value
-        if self.autowrite:
-            self.write()
+        if not isinstance(value, MultiFileTagValue):
+            self._edits[key] = value
+            if self.autowrite:
+                self.write()
 
     def __delitem__(self, key):
         self._edits[key] = None
